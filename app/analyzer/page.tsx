@@ -5,6 +5,7 @@ import AuthGuard from "@/lib/AuthGuard";
 import { useAuth } from "@/lib/AuthContext";
 import { signOut } from "@/lib/firebase";
 import { auth } from "@/lib/firebase";
+import { redactionSummary } from "@/lib/ScrubPII";
 
 interface ParsedPDF {
   text: string;
@@ -15,6 +16,16 @@ interface ParsedPDF {
   fileSize: number;
 }
 
+interface AnalysisResult {
+  // Shape this to match whatever your backend returns
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  [key: string]: any;
+  redactions?: Record<string, number>;
+}
+
+// Pipeline step shown in the loading UI
+type Step = "parsing" | "scrubbing" | "analyzing" | "done";
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -23,14 +34,16 @@ function formatFileSize(bytes: number): string {
 
 function PDFParserInner() {
   const { user } = useAuth();
-  const handleSignOut = async () => {
-    await signOut(auth);
-  };
+  const handleSignOut = async () => { await signOut(auth); };
+
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [step, setStep] = useState<Step>("parsing");
   const [parsed, setParsed] = useState<ParsedPDF | null>(null);
+  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [redactionNote, setRedactionNote] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"text" | "meta">("text");
+  const [activeTab, setActiveTab] = useState<"text" | "analysis" | "meta">("analysis");
   const [copied, setCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -42,15 +55,41 @@ function PDFParserInner() {
     setIsLoading(true);
     setError(null);
     setParsed(null);
-
-    const formData = new FormData();
-    formData.append("file", file);
+    setAnalysis(null);
+    setRedactionNote("");
 
     try {
-      const res = await fetch("/api/parse-pdf", { method: "POST", body: formData });
+      // ── Single route handles parse → scrub → analyze ──
+      setStep("parsing");
+      const formData = new FormData();
+      formData.append("file", file);
+
+      // Optimistically advance the step indicators as time passes
+      const scrubTimer = setTimeout(() => setStep("scrubbing"), 800);
+      const analyzeTimer = setTimeout(() => setStep("analyzing"), 1400);
+
+      const res = await fetch("/api/process-statement", { method: "POST", body: formData });
+
+      clearTimeout(scrubTimer);
+      clearTimeout(analyzeTimer);
+
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Parsing failed");
-      setParsed(data);
+      if (!res.ok) throw new Error(data.error || "Processing failed");
+
+      // Shape matches what the old separate routes returned
+      setParsed({
+        text: data.text,
+        numPages: data.numPages,
+        numRenderedPages: data.numRenderedPages,
+        info: data.info,
+        fileName: data.fileName,
+        fileSize: data.fileSize,
+      });
+      setAnalysis(data.analysis);
+      if (data.redactions) {
+        setRedactionNote(redactionSummary(data.redactions));
+      }
+      setStep("done");
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
@@ -156,11 +195,35 @@ function PDFParserInner() {
           >
             <div className="py-16 flex flex-col items-center gap-5">
               {isLoading ? (
-                <div className="flex flex-col items-center gap-4">
+                <div className="flex flex-col items-center gap-6 py-4">
                   <div className="w-12 h-12 rounded-full border-4 border-[#e0e3e8] border-t-[#0077C5] animate-spin" />
-                  <div className="text-center">
-                    <p className="text-[#1a1a2e] font-semibold">Parsing your document…</p>
-                    <p className="text-sm text-[#6b7280] mt-1">This usually takes just a moment.</p>
+                  <div className="flex flex-col gap-2.5 w-64">
+                    {([
+                      { id: "parsing",   label: "Extracting text from PDF" },
+                      { id: "scrubbing", label: "Scrubbing PII from text" },
+                      { id: "analyzing", label: "Sending to analysis backend" },
+                    ] as const).map(({ id, label }) => {
+                      const order = ["parsing", "scrubbing", "analyzing"];
+                      const currentIdx = order.indexOf(step);
+                      const thisIdx = order.indexOf(id);
+                      const isDone = thisIdx < currentIdx;
+                      const isActive = thisIdx === currentIdx;
+                      return (
+                        <div key={id} className="flex items-center gap-3">
+                          <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 transition-all ${
+                            isDone ? "bg-[#22c55e]" : isActive ? "bg-[#0077C5] animate-pulse" : "bg-[#e0e3e8]"
+                          }`}>
+                            {isDone
+                              ? <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
+                              : <div className={`w-2 h-2 rounded-full ${isActive ? "bg-white" : "bg-[#c8d3df]"}`} />
+                            }
+                          </div>
+                          <span className={`text-sm transition-all ${isDone ? "text-[#22c55e] font-medium" : isActive ? "text-[#0077C5] font-semibold" : "text-[#9ca3af]"}`}>
+                            {label}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               ) : (
@@ -232,10 +295,23 @@ function PDFParserInner() {
               </div>
             </div>
 
+            {/* PII redaction notice */}
+            {redactionNote && (
+              <div className="flex items-start gap-3 bg-[#fffbeb] border border-[#fcd34d] rounded-xl px-5 py-3.5">
+                <svg className="w-4 h-4 text-[#d97706] flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+                </svg>
+                <div>
+                  <p className="text-xs font-bold text-[#92400e] uppercase tracking-wide mb-0.5">PII Scrubbed Before Sending</p>
+                  <p className="text-xs text-[#92400e]">{redactionNote}</p>
+                </div>
+              </div>
+            )}
+
             {/* Tab card */}
             <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm overflow-hidden">
               <div className="flex border-b border-[#e0e3e8] px-2 pt-2 bg-[#f9fafb]">
-                {(["text", "meta"] as const).map((tab) => (
+                {(["analysis", "text", "meta"] as const).map((tab) => (
                   <button key={tab} onClick={() => setActiveTab(tab)}
                     className={`px-5 py-2.5 text-sm font-semibold rounded-t-lg transition-all mr-1
                       ${activeTab === tab
@@ -243,7 +319,7 @@ function PDFParserInner() {
                         : "text-[#6b7280] hover:text-[#1a1a2e] hover:bg-white/60"
                       }`}
                   >
-                    {tab === "text" ? "Extracted Text" : "Document Metadata"}
+                    {tab === "analysis" ? "Analysis" : tab === "text" ? "Extracted Text" : "Metadata"}
                   </button>
                 ))}
                 {activeTab === "text" && (
@@ -261,6 +337,23 @@ function PDFParserInner() {
                   </div>
                 )}
               </div>
+
+              {/* Analysis tab — renders whatever your backend returns */}
+              {activeTab === "analysis" && (
+                <div className="p-6">
+                  {analysis ? (
+                    <pre className="text-sm text-[#374151] leading-relaxed whitespace-pre-wrap break-words overflow-auto max-h-[480px] bg-[#f9fafb] rounded-xl p-5 border border-[#e0e3e8]"
+                      style={{ fontFamily: "'Courier New', monospace", scrollbarColor: "#c8d3df transparent" }}>
+                      {JSON.stringify(analysis, null, 2)}
+                    </pre>
+                  ) : (
+                    <div className="flex flex-col items-center gap-3 py-10 text-center">
+                      <div className="w-12 h-12 rounded-2xl bg-[#f4f5f8] flex items-center justify-center text-2xl">📊</div>
+                      <p className="text-sm text-[#6b7280]">Analysis results will appear here once your backend responds.</p>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {activeTab === "text" && (
                 <div className="p-6">
