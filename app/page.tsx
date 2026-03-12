@@ -27,7 +27,6 @@ const FEATURES = [
 ];
 
 const STATS = [
-  { value: "2M+", label: "Statements analyzed" },
   { value: "99.8%", label: "Parse accuracy" },
   { value: "< 3s", label: "Average processing time" },
   { value: "256-bit", label: "Encryption standard" },
@@ -203,19 +202,6 @@ export default function HomePage() {
                 </svg>
               </button>
             </div>
-
-            <div className="flex items-center gap-3 pt-1">
-              <div className="flex -space-x-2">
-                {["#0077C5", "#22c55e", "#f59e0b", "#8b5cf6"].map((c, i) => (
-                  <div key={i} className="w-7 h-7 rounded-full border-2 border-white flex items-center justify-center text-white text-[9px] font-bold" style={{ backgroundColor: c }}>
-                    {["JK", "AM", "SR", "LT"][i]}
-                  </div>
-                ))}
-              </div>
-              <p className="text-xs text-[#6b7280]">
-                <span className="font-semibold text-[#1a1a2e]">2,000+</span> people analyzed their spending this week
-              </p>
-            </div>
           </div>
 
           <div className="hidden md:block">
@@ -226,7 +212,7 @@ export default function HomePage() {
 
       {/* STATS BAND */}
       <section className="bg-[#0077C5]">
-        <div className="max-w-6xl mx-auto px-6 py-10 grid grid-cols-2 md:grid-cols-4 gap-8">
+        <div className="max-w-6xl mx-auto px-6 py-10 grid grid-cols-2 md:grid-cols-3 gap-8">
           {STATS.map(({ value, label }) => (
             <div key={label} className="text-center">
               <p className="text-3xl font-extrabold text-white tracking-tight">{value}</p>
@@ -290,7 +276,7 @@ export default function HomePage() {
           <h2 className="text-4xl font-extrabold text-white tracking-tight">Ready to take control of your finances?</h2>
           <p className="text-blue-100 text-base">Upload your first statement in seconds — no account required.</p>
           <button
-            onClick={() => router.push("/analyzer")}
+            onClick={() => router.push("/login")}
             className="inline-flex items-center gap-2 bg-white text-[#0077C5] font-bold px-8 py-4 rounded-xl shadow-xl hover:shadow-2xl hover:bg-blue-50 active:scale-95 transition-all text-base"
           >
             Start analyzing for free

@@ -1,6 +1,10 @@
 "use client";
 
 import { useState, useCallback, useRef } from "react";
+import AuthGuard from "@/lib/AuthGuard";
+import { useAuth } from "@/lib/AuthContext";
+import { signOut } from "@/lib/firebase";
+import { auth } from "@/lib/firebase";
 
 interface ParsedPDF {
   text: string;
@@ -17,7 +21,11 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function PDFParser() {
+function PDFParserInner() {
+  const { user } = useAuth();
+  const handleSignOut = async () => {
+    await signOut(auth);
+  };
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [parsed, setParsed] = useState<ParsedPDF | null>(null);
@@ -92,7 +100,10 @@ export default function PDFParser() {
             <a href="/" className="text-blue-200 text-sm font-medium hover:text-white transition-colors">Dashboard</a>
             <span className="text-white text-sm font-semibold border-b-2 border-white pb-0.5 cursor-pointer">Analyzer</span>
             <span className="text-blue-200 text-sm font-medium cursor-pointer hover:text-white transition-colors">Reports</span>
-            <div className="w-8 h-8 rounded-full bg-[#005999] flex items-center justify-center text-white text-xs font-bold cursor-pointer">S</div>
+            <button onClick={handleSignOut} className="text-blue-200 text-xs font-medium hover:text-white transition-colors">Sign out</button>
+            <div className="w-8 h-8 rounded-full bg-[#005999] flex items-center justify-center text-white text-xs font-bold cursor-pointer">
+              {user?.displayName?.[0] ?? user?.email?.[0]?.toUpperCase() ?? "U"}
+            </div>
           </div>
         </div>
       </nav>
@@ -289,5 +300,13 @@ export default function PDFParser() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function PDFParser() {
+  return (
+    <AuthGuard>
+      <PDFParserInner />
+    </AuthGuard>
   );
 }
