@@ -9,6 +9,7 @@ import { signOut } from "@/lib/firebase";
 import { auth } from "@/lib/firebase";
 import { redactionSummary } from "@/lib/ScrubPII";
 import AnalysisDashboard from "@/components/AnalysisDashboard";
+import { saveReport } from "@/lib/Reports";
 
 interface ParsedPDF {
   text: string;
@@ -93,6 +94,18 @@ function PDFParserInner() {
         setRedactionNote(redactionSummary(data.redactions));
       }
       setStep("done");
+
+      // Auto-save report to Firestore (non-blocking — don't fail the UI if this errors)
+      if (data.analysis && auth.currentUser) {
+        saveReport(auth.currentUser.uid, {
+          fileName: data.fileName,
+          fileSize: data.fileSize,
+          numPages: data.numPages,
+          transactionsFound: data.analysis._transactionsFound ?? data.analysis.transactions?.length ?? 0,
+          extractionMode: data.analysis._extractionMode ?? "unknown",
+          result: data.analysis,
+        }).catch((e) => console.warn("Failed to save report:", e));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
@@ -141,7 +154,7 @@ function PDFParserInner() {
           <div className="flex items-center gap-6">
             <a href="/" className="text-blue-200 text-sm font-medium hover:text-white transition-colors">Dashboard</a>
             <span className="text-white text-sm font-semibold border-b-2 border-white pb-0.5 cursor-pointer">Analyzer</span>
-            <span className="text-blue-200 text-sm font-medium cursor-pointer hover:text-white transition-colors">Reports</span>
+            <a href="/reports" className="text-blue-200 text-sm font-medium hover:text-white transition-colors">Reports</a>
             <button onClick={handleSignOut} className="text-blue-200 text-xs font-medium hover:text-white transition-colors">Sign out</button>
             <div className="w-8 h-8 rounded-full bg-[#005999] flex items-center justify-center text-white text-xs font-bold cursor-pointer">
               {user?.displayName?.[0] ?? user?.email?.[0]?.toUpperCase() ?? "U"}
