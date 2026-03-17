@@ -75,7 +75,7 @@ const fmt = (n: number) =>
 // ── Summary cards ─────────────────────────────────────────────────────────────
 
 function SummaryCards({ result }: { result: AnalysisResult }) {
-  const net = result.total_in - result.total_out;
+  const net = (result.total_in ?? 0) - (result.total_out ?? 0);
   return (
     <div className="grid grid-cols-3 gap-4">
       {[
@@ -357,7 +357,7 @@ function Insights({ insights }: { insights: string[] }) {
 // ── Anomalies ─────────────────────────────────────────────────────────────────
 
 function AnomalyPanel({ anomalies }: { anomalies: Anomaly[] }) {
-  if (!anomalies.length) return null;
+  if (!anomalies?.length) return null;
   return (
     <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm p-6">
       <h3 className="text-xs font-bold text-[#6b7280] uppercase tracking-wider mb-4 flex items-center gap-2">
@@ -396,7 +396,7 @@ function AnomalyPanel({ anomalies }: { anomalies: Anomaly[] }) {
 // ── Tax Deductibles ───────────────────────────────────────────────────────────
 
 function TaxPanel({ items }: { items: TaxDeductible[] }) {
-  if (!items.length) return null;
+  if (!items?.length) return null;
   const total = items.reduce((s, t) => s + Math.abs(t.amount), 0);
   return (
     <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm p-6">

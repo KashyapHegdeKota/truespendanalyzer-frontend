@@ -8,6 +8,7 @@ import {
   Timestamp,
 } from "firebase/firestore";
 import { firestore } from "./firebase";
+import type { AnalysisResult } from "@/components/AnalysisDashboard";
 
 export interface SavedReport {
   id: string;
@@ -19,7 +20,7 @@ export interface SavedReport {
   totalOut: number;
   transactionsFound: number;
   extractionMode: string;
-  result: Record<string, unknown>;
+  result: AnalysisResult;
 }
 
 /**
@@ -34,7 +35,7 @@ export async function saveReport(
     numPages: number;
     transactionsFound: number;
     extractionMode: string;
-    result: Record<string, unknown>;
+    result: AnalysisResult;
   }
 ): Promise<string> {
   const ref = collection(firestore, "users", uid, "reports");

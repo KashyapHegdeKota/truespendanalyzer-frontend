@@ -9,7 +9,7 @@ import { useAuth } from "@/lib/AuthContext";
 import { signOut } from "@/lib/firebase";
 import { auth } from "@/lib/firebase";
 import { getReports, SavedReport } from "@/lib/Reports";
-import AnalysisDashboard from "@/components/AnalysisDashboard";
+import AnalysisDashboard, { AnalysisResult } from "@/components/AnalysisDashboard";
 
 function formatFileSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -68,11 +68,11 @@ function ReportCard({ report }: { report: SavedReport }) {
         </div>
 
         {/* Anomaly badge */}
-        {(report.result as Record<string, unknown[]>)?.anomalies?.length > 0 && (
+        {(report.result.anomalies?.length ?? 0) > 0 && (
           <div className="flex-shrink-0 flex items-center gap-1 bg-[#fff1f2] border border-[#fecdd3] px-2.5 py-1 rounded-full">
             <span className="text-xs">⚠️</span>
             <span className="text-xs font-semibold text-[#be123c]">
-              {(report.result as Record<string, unknown[]>).anomalies.length} anomal{(report.result as Record<string, unknown[]>).anomalies.length === 1 ? "y" : "ies"}
+              {report.result.anomalies!.length} anomal{report.result.anomalies!.length === 1 ? "y" : "ies"}
             </span>
           </div>
         )}
@@ -90,7 +90,7 @@ function ReportCard({ report }: { report: SavedReport }) {
       {expanded && (
         <div className="border-t border-[#e0e3e8] bg-[#f4f5f8] p-6">
           <AnalysisDashboard
-            result={report.result as Parameters<typeof AnalysisDashboard>[0]["result"]}
+            result={report.result as unknown as AnalysisResult}
             cached={false}
           />
         </div>
