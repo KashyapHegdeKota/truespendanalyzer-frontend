@@ -1,426 +1,500 @@
 "use client";
 
-export const dynamic = "force-dynamic";
+import { useState, useMemo } from "react";
+import {
+  PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid,
+} from "recharts";
 
-import { useState, useCallback, useRef } from "react";
-import AuthGuard from "@/lib/AuthGuard";
-import { useAuth } from "@/lib/AuthContext";
-import { signOut } from "@/lib/firebase";
-import { auth } from "@/lib/firebase";
-import { redactionSummary } from "@/lib/ScrubPII";
-import AnalysisDashboard from "@/components/AnalysisDashboard";
-import { saveReport } from "@/lib/Reports";
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-interface ParsedPDF {
-  text: string;
-  numPages: number;
-  numRenderedPages: number;
-  info: Record<string, string>;
-  fileName: string;
-  fileSize: number;
+interface Transaction {
+  date: string;
+  description: string;
+  amount: number;
+  category: string;
 }
 
-interface AnalysisResult {
-  // Shape this to match whatever your backend returns
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  [key: string]: any;
-  redactions?: Record<string, number>;
+interface Anomaly {
+  type: "large_transaction" | "duplicate";
+  description: string;
+  amount: number;
+  reason: string;
 }
 
-// Pipeline step shown in the loading UI
-type Step = "parsing" | "scrubbing" | "analyzing" | "done";
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+interface TaxDeductible {
+  description: string;
+  amount: number;
+  reason: string;
 }
 
-function PDFParserInner() {
-  const { user } = useAuth();
-  const handleSignOut = async () => { await signOut(auth); };
+export interface AnalysisResult {
+  transactions: Transaction[];
+  summary: Record<string, number>;
+  total_in: number;
+  total_out: number;
+  insights: string[];
+  anomalies?: Anomaly[];
+  tax_deductibles?: TaxDeductible[];
+  // private proxy fields
+  _cached?: boolean;
+  _cacheAgeSeconds?: number;
+  _extractionMode?: string;
+  _transactionsFound?: number;
+}
 
-  const [isDragging, setIsDragging] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [step, setStep] = useState<Step>("parsing");
-  const [parsed, setParsed] = useState<ParsedPDF | null>(null);
-  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
-  const [redactionNote, setRedactionNote] = useState<string>("");
-  const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"text" | "analysis" | "meta">("analysis");
-  const [copied, setCopied] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+interface Props {
+  result: AnalysisResult;
+  cached?: boolean;
+  cacheAgeSeconds?: number;
+}
 
-  const handleFile = useCallback(async (file: File) => {
-    if (file.type !== "application/pdf") {
-      setError("Only PDF files are supported.");
-      return;
-    }
-    setIsLoading(true);
-    setError(null);
-    setParsed(null);
-    setAnalysis(null);
-    setRedactionNote("");
+// ── Category colours ──────────────────────────────────────────────────────────
 
-    try {
-      // ── Single route handles parse → scrub → analyze ──
-      setStep("parsing");
-      const formData = new FormData();
-      formData.append("file", file);
+const CATEGORY_COLORS: Record<string, string> = {
+  "Food & Dining":         "#0077C5",
+  "Transport":             "#22c55e",
+  "Housing & Utilities":   "#f59e0b",
+  "Healthcare":            "#ef4444",
+  "Shopping":              "#8b5cf6",
+  "Entertainment":         "#ec4899",
+  "Travel":                "#06b6d4",
+  "Income":                "#10b981",
+  "Savings & Investments": "#6366f1",
+  "Subscriptions":         "#f97316",
+  "ATM & Cash":            "#84cc16",
+  "Transfers":             "#64748b",
+  "Other":                 "#94a3b8",
+};
 
-      // Optimistically advance the step indicators as time passes
-      const scrubTimer = setTimeout(() => setStep("scrubbing"), 800);
-      const analyzeTimer = setTimeout(() => setStep("analyzing"), 1400);
+const categoryColor = (cat: string) => CATEGORY_COLORS[cat] ?? "#94a3b8";
 
-      const res = await fetch("/api/process-statement", { method: "POST", body: formData });
+const fmt = (n: number) =>
+  new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" }).format(Math.abs(n));
 
-      clearTimeout(scrubTimer);
-      clearTimeout(analyzeTimer);
+// ── Summary cards ─────────────────────────────────────────────────────────────
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Processing failed");
+function SummaryCards({ result }: { result: AnalysisResult }) {
+  const net = result.total_in - result.total_out;
+  return (
+    <div className="grid grid-cols-3 gap-4">
+      {[
+        { label: "Money In",  value: fmt(result.total_in),  color: "text-[#22c55e]", bg: "bg-[#dcfce7]", sign: "↑" },
+        { label: "Money Out", value: fmt(result.total_out), color: "text-[#ef4444]", bg: "bg-[#fee2e2]", sign: "↓" },
+        { label: "Net",       value: fmt(net),              color: net >= 0 ? "text-[#0077C5]" : "text-[#ef4444]", bg: "bg-[#e8f4fc]", sign: net >= 0 ? "+" : "−" },
+      ].map(({ label, value, color, bg, sign }) => (
+        <div key={label} className="bg-white rounded-2xl border border-[#e0e3e8] px-5 py-4 shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-[#6b7280] uppercase tracking-wider">{label}</span>
+            <div className={`w-7 h-7 rounded-lg ${bg} flex items-center justify-center font-bold text-sm ${color}`}>{sign}</div>
+          </div>
+          <p className={`text-2xl font-extrabold tracking-tight ${color}`}>{value}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
 
-      // Shape matches what the old separate routes returned
-      setParsed({
-        text: data.text,
-        numPages: data.numPages,
-        numRenderedPages: data.numRenderedPages,
-        info: data.info,
-        fileName: data.fileName,
-        fileSize: data.fileSize,
-      });
-      setAnalysis(data.analysis);
-      if (data.redactions) {
-        setRedactionNote(redactionSummary(data.redactions));
-      }
-      setStep("done");
+// ── Donut chart ───────────────────────────────────────────────────────────────
 
-      // Auto-save report to Firestore (non-blocking — don't fail the UI if this errors)
-      if (data.analysis && auth.currentUser) {
-        saveReport(auth.currentUser.uid, {
-          fileName: data.fileName,
-          fileSize: data.fileSize,
-          numPages: data.numPages,
-          transactionsFound: data.analysis._transactionsFound ?? data.analysis.transactions?.length ?? 0,
-          extractionMode: data.analysis._extractionMode ?? "unknown",
-          result: data.analysis,
-        }).catch((e) => console.warn("Failed to save report:", e));
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "An error occurred");
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+function DonutChart({ summary }: { summary: Record<string, number> }) {
+  const data = Object.entries(summary)
+    .filter(([, v]) => v < 0)
+    .map(([name, value]) => ({ name, value: Math.abs(value) }))
+    .sort((a, b) => b.value - a.value);
 
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const file = e.dataTransfer.files[0];
-    if (file) handleFile(file);
-  }, [handleFile]);
-
-  const copyText = () => {
-    if (parsed?.text) {
-      navigator.clipboard.writeText(parsed.text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
-  const reset = () => {
-    setParsed(null);
-    setError(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  };
-
-  const wordCount = parsed?.text?.split(/\s+/).filter(Boolean).length ?? 0;
+  const [active, setActive] = useState<string | null>(null);
 
   return (
-    <div className="min-h-screen bg-[#f4f5f8]" style={{ fontFamily: "'Avenir Next', 'Avenir', 'Nunito Sans', sans-serif" }}>
-
-      {/* Top nav */}
-      <nav className="bg-[#0077C5] shadow-md">
-        <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded bg-white flex items-center justify-center">
-              <svg viewBox="0 0 20 20" className="w-4 h-4 fill-[#0077C5]">
-                <rect x="2" y="2" width="6" height="16" rx="1.5" />
-                <rect x="12" y="7" width="6" height="11" rx="1.5" />
-              </svg>
-            </div>
-            <span className="text-white font-bold text-lg tracking-tight">TrueSpend</span>
-          </div>
-          <div className="flex items-center gap-6">
-            <a href="/" className="text-blue-200 text-sm font-medium hover:text-white transition-colors">Dashboard</a>
-            <span className="text-white text-sm font-semibold border-b-2 border-white pb-0.5 cursor-pointer">Analyzer</span>
-            <a href="/reports" className="text-blue-200 text-sm font-medium hover:text-white transition-colors">Reports</a>
-            <button onClick={handleSignOut} className="text-blue-200 text-xs font-medium hover:text-white transition-colors">Sign out</button>
-            <div className="w-8 h-8 rounded-full bg-[#005999] flex items-center justify-center text-white text-xs font-bold cursor-pointer">
-              {user?.displayName?.[0] ?? user?.email?.[0]?.toUpperCase() ?? "U"}
-            </div>
-          </div>
-        </div>
-      </nav>
-
-      {/* Page header */}
-      <div className="bg-white border-b border-[#e0e3e8]">
-        <div className="max-w-6xl mx-auto px-6 py-6 flex items-center justify-between">
-          <div>
-            <p className="text-xs text-[#6b7280] uppercase tracking-widest font-semibold mb-1">Document Processing</p>
-            <h1 className="text-2xl font-bold text-[#1a1a2e] tracking-tight">Statement Analyzer</h1>
-            <p className="text-sm text-[#6b7280] mt-1">Upload a PDF bank or credit card statement to extract and analyze your spending data.</p>
-          </div>
-          {parsed && (
-            <button onClick={reset} className="flex items-center gap-2 px-4 py-2 rounded-lg border border-[#0077C5] text-[#0077C5] text-sm font-semibold hover:bg-[#e8f4fc] transition-colors">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-              </svg>
-              Upload New File
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="max-w-6xl mx-auto px-6 py-8 space-y-6">
-
-        {/* Error */}
-        {error && (
-          <div className="flex items-center gap-3 bg-[#fff4f4] border border-[#f87171] rounded-xl px-5 py-4">
-            <svg className="w-5 h-5 text-[#dc2626] flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-            </svg>
-            <p className="text-sm text-[#991b1b] font-medium">{error}</p>
-            <button onClick={() => setError(null)} className="ml-auto text-[#dc2626] hover:text-[#991b1b]">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-        )}
-
-        {/* Upload zone */}
-        {!parsed && (
-          <div
-            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={onDrop}
-            onClick={() => !isLoading && fileInputRef.current?.click()}
-            className={`bg-white rounded-2xl border-2 border-dashed transition-all duration-200 cursor-pointer
-              ${isDragging ? "border-[#0077C5] bg-[#e8f4fc]" : "border-[#c8d3df] hover:border-[#0077C5] hover:bg-[#f7fbff]"}`}
-          >
-            <div className="py-16 flex flex-col items-center gap-5">
-              {isLoading ? (
-                <div className="flex flex-col items-center gap-6 py-4">
-                  <div className="w-12 h-12 rounded-full border-4 border-[#e0e3e8] border-t-[#0077C5] animate-spin" />
-                  <div className="flex flex-col gap-2.5 w-64">
-                    {([
-                      { id: "parsing",   label: "Extracting text from PDF" },
-                      { id: "scrubbing", label: "Scrubbing PII from text" },
-                      { id: "analyzing", label: "Sending to analysis backend" },
-                    ] as const).map(({ id, label }) => {
-                      const order = ["parsing", "scrubbing", "analyzing"];
-                      const currentIdx = order.indexOf(step);
-                      const thisIdx = order.indexOf(id);
-                      const isDone = thisIdx < currentIdx;
-                      const isActive = thisIdx === currentIdx;
-                      return (
-                        <div key={id} className="flex items-center gap-3">
-                          <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 transition-all ${
-                            isDone ? "bg-[#22c55e]" : isActive ? "bg-[#0077C5] animate-pulse" : "bg-[#e0e3e8]"
-                          }`}>
-                            {isDone
-                              ? <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
-                              : <div className={`w-2 h-2 rounded-full ${isActive ? "bg-white" : "bg-[#c8d3df]"}`} />
-                            }
-                          </div>
-                          <span className={`text-sm transition-all ${isDone ? "text-[#22c55e] font-medium" : isActive ? "text-[#0077C5] font-semibold" : "text-[#9ca3af]"}`}>
-                            {label}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <div className="w-16 h-16 rounded-2xl bg-[#e8f4fc] flex items-center justify-center">
-                    <svg className="w-8 h-8 text-[#0077C5]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m6.75 12l-3-3m0 0l-3 3m3-3v6m-1.5-15H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-                    </svg>
-                  </div>
-                  <div className="text-center">
-                    <p className="text-[#1a1a2e] font-semibold text-base">Drag & drop your PDF here</p>
-                    <p className="text-sm text-[#6b7280] mt-1">
-                      or <span className="text-[#0077C5] font-semibold underline underline-offset-2">browse to upload</span>
-                    </p>
-                    <p className="text-xs text-[#9ca3af] mt-3">PDF files only · Max 50 MB</p>
-                  </div>
-                  <div className="flex items-center gap-6 pt-1">
-                    {["Bank Statements", "Credit Card Bills", "Invoices"].map((label) => (
-                      <span key={label} className="flex items-center gap-1.5 text-xs text-[#6b7280]">
-                        <svg className="w-3.5 h-3.5 text-[#22c55e]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                        </svg>
-                        {label}
-                      </span>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-            <input ref={fileInputRef} type="file" accept="application/pdf" className="hidden"
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
-          </div>
-        )}
-
-        {/* Results */}
-        {parsed && (
-          <>
-            {/* Stats row */}
-            <div className="grid grid-cols-3 gap-4">
-              {[
-                { label: "Pages Parsed", value: parsed.numPages, color: "text-[#0077C5]", bg: "bg-[#e8f4fc]", emoji: "📄" },
-                { label: "Words Extracted", value: wordCount.toLocaleString(), color: "text-[#6b21a8]", bg: "bg-[#f3e8ff]", emoji: "📝" },
-                { label: "Characters", value: (parsed.text?.length ?? 0).toLocaleString(), color: "text-[#0d9488]", bg: "bg-[#ccfbf1]", emoji: "🔤" },
-              ].map(({ label, value, color, bg, emoji }) => (
-                <div key={label} className="bg-white rounded-2xl border border-[#e0e3e8] px-6 py-5 shadow-sm">
-                  <div className="flex items-center justify-between mb-3">
-                    <span className="text-xs font-semibold text-[#6b7280] uppercase tracking-wider">{label}</span>
-                    <div className={`w-8 h-8 rounded-lg ${bg} flex items-center justify-center text-base`}>{emoji}</div>
-                  </div>
-                  <p className={`text-3xl font-bold tracking-tight ${color}`}>{value}</p>
-                </div>
-              ))}
-            </div>
-
-            {/* File pill */}
-            <div className="flex items-center gap-3 bg-white rounded-xl border border-[#e0e3e8] px-5 py-3 shadow-sm">
-              <div className="w-9 h-9 rounded-lg bg-[#fee2e2] flex items-center justify-center flex-shrink-0">
-                <svg className="w-5 h-5 text-[#dc2626]" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
-                </svg>
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-[#1a1a2e] truncate">{parsed.fileName}</p>
-                <p className="text-xs text-[#6b7280]">{formatFileSize(parsed.fileSize)} · {parsed.numPages} page{parsed.numPages !== 1 ? "s" : ""}</p>
-              </div>
-              <div className="flex items-center gap-1.5 bg-[#dcfce7] px-3 py-1 rounded-full">
-                <div className="w-1.5 h-1.5 rounded-full bg-[#16a34a]" />
-                <span className="text-xs font-semibold text-[#15803d]">Parsed successfully</span>
-              </div>
-            </div>
-
-            {/* PII redaction notice */}
-            {redactionNote && (
-              <div className="flex items-start gap-3 bg-[#fffbeb] border border-[#fcd34d] rounded-xl px-5 py-3.5">
-                <svg className="w-4 h-4 text-[#d97706] flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
-                </svg>
-                <div>
-                  <p className="text-xs font-bold text-[#92400e] uppercase tracking-wide mb-0.5">PII Scrubbed Before Sending</p>
-                  <p className="text-xs text-[#92400e]">{redactionNote}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Tab card */}
-            <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm overflow-hidden">
-              <div className="flex border-b border-[#e0e3e8] px-2 pt-2 bg-[#f9fafb]">
-                {(["analysis", "text", "meta"] as const).map((tab) => (
-                  <button key={tab} onClick={() => setActiveTab(tab)}
-                    className={`px-5 py-2.5 text-sm font-semibold rounded-t-lg transition-all mr-1
-                      ${activeTab === tab
-                        ? "bg-white border border-b-white border-[#e0e3e8] text-[#0077C5] -mb-px shadow-sm"
-                        : "text-[#6b7280] hover:text-[#1a1a2e] hover:bg-white/60"
-                      }`}
-                  >
-                    {tab === "analysis" ? "Analysis" : tab === "text" ? "Extracted Text" : "Metadata"}
-                  </button>
+    <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm p-6">
+      <h3 className="text-xs font-bold text-[#6b7280] uppercase tracking-wider mb-4">Spending by Category</h3>
+      <div className="flex items-center gap-6">
+        <div className="w-44 h-44 flex-shrink-0">
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie
+                data={data}
+                cx="50%"
+                cy="50%"
+                innerRadius={48}
+                outerRadius={68}
+                paddingAngle={2}
+                dataKey="value"
+                onMouseEnter={(_, i) => setActive(data[i].name)}
+                onMouseLeave={() => setActive(null)}
+                strokeWidth={0}
+              >
+                {data.map((entry) => (
+                  <Cell
+                    key={entry.name}
+                    fill={categoryColor(entry.name)}
+                    opacity={active === null || active === entry.name ? 1 : 0.35}
+                  />
                 ))}
-                {activeTab === "text" && (
-                  <div className="ml-auto flex items-center pr-3 pb-1">
-                    <button onClick={copyText}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all
-                        ${copied ? "bg-[#dcfce7] text-[#15803d]" : "bg-white border border-[#e0e3e8] text-[#6b7280] hover:border-[#0077C5] hover:text-[#0077C5]"}`}
-                    >
-                      {copied ? (
-                        <><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>Copied!</>
-                      ) : (
-                        <><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>Copy Text</>
-                      )}
-                    </button>
-                  </div>
-                )}
+              </Pie>
+              <Tooltip
+                formatter={(v) => fmt(Number(v))}
+                contentStyle={{ borderRadius: 10, border: "1px solid #e0e3e8", fontSize: 12 }}
+              />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="flex-1 space-y-2 overflow-y-auto max-h-40 pr-1">
+          {data.map(({ name, value }) => (
+            <div
+              key={name}
+              className="flex items-center justify-between gap-3 cursor-default"
+              onMouseEnter={() => setActive(name)}
+              onMouseLeave={() => setActive(null)}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: categoryColor(name) }} />
+                <span className={`text-xs truncate transition-colors ${active === name ? "font-semibold text-[#1a1a2e]" : "text-[#6b7280]"}`}>{name}</span>
               </div>
-
-              {/* Analysis tab */}
-              {activeTab === "analysis" && (
-                <div className="p-6">
-                  {analysis?.transactions?.length > 0 ? (
-                    <AnalysisDashboard
-                      result={analysis!}
-                      cached={analysis!._cached}
-                      cacheAgeSeconds={analysis!._cacheAgeSeconds}
-                    />
-                  ) : (
-                    <div className="flex flex-col items-center gap-3 py-10 text-center">
-                      <div className="w-12 h-12 rounded-2xl bg-[#f4f5f8] flex items-center justify-center text-2xl">📊</div>
-                      <p className="text-sm text-[#6b7280]">
-                        {analysis
-                          ? "Backend returned no transactions. Check your parser regex."
-                          : "Analysis results will appear here once your backend responds."}
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {activeTab === "text" && (
-                <div className="p-6">
-                  <pre className="text-sm text-[#374151] leading-relaxed whitespace-pre-wrap break-words overflow-auto max-h-[480px] bg-[#f9fafb] rounded-xl p-5 border border-[#e0e3e8]"
-                    style={{ fontFamily: "'Courier New', monospace", scrollbarColor: "#c8d3df transparent" }}>
-                    {parsed.text || <span className="text-[#9ca3af] italic">No text content found. This may be a scanned or image-based PDF.</span>}
-                  </pre>
-                </div>
-              )}
-
-              {activeTab === "meta" && (
-                <div className="p-6">
-                  <div className="rounded-xl border border-[#e0e3e8] overflow-hidden">
-                    {[
-                      ["File Name", parsed.fileName],
-                      ["File Size", formatFileSize(parsed.fileSize)],
-                      ["Total Pages", String(parsed.numPages)],
-                      ["Rendered Pages", String(parsed.numRenderedPages)],
-                      ...(parsed.info ? Object.entries(parsed.info).filter(([, v]) => v && String(v).trim()) : []),
-                    ].map(([key, value], i) => (
-                      <div key={key} className={`flex items-start gap-6 px-5 py-3.5 text-sm ${i % 2 === 0 ? "bg-white" : "bg-[#f9fafb]"} ${i !== 0 ? "border-t border-[#e0e3e8]" : ""}`}>
-                        <span className="text-[#6b7280] font-medium w-40 flex-shrink-0">{key}</span>
-                        <span className="text-[#1a1a2e] break-all">{String(value)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+              <span className="text-xs font-semibold text-[#1a1a2e] flex-shrink-0">{fmt(value)}</span>
             </div>
-          </>
-        )}
-
-        {!parsed && !isLoading && (
-          <p className="text-center text-xs text-[#9ca3af]">
-            🔒 Your files are processed securely and never stored on our servers.
-          </p>
-        )}
+          ))}
+        </div>
       </div>
     </div>
   );
 }
 
-export default function PDFParser() {
+// ── Cash flow bar chart ───────────────────────────────────────────────────────
+
+function CashFlowBar({ transactions }: { transactions: Transaction[] }) {
+  const byMonth = useMemo(() => {
+    const map: Record<string, { month: string; in: number; out: number }> = {};
+    for (const tx of transactions) {
+      // Try to extract a readable month label from various date formats
+      let month = tx.date;
+      const namedMonth = tx.date.match(
+        /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b/i
+      );
+      if (namedMonth) month = namedMonth[0].slice(0, 3);
+      if (!map[month]) map[month] = { month, in: 0, out: 0 };
+      if (tx.amount >= 0) map[month].in  += tx.amount;
+      else                map[month].out += Math.abs(tx.amount);
+    }
+    return Object.values(map);
+  }, [transactions]);
+
   return (
-    <AuthGuard>
-      <PDFParserInner />
-    </AuthGuard>
+    <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm p-6">
+      <h3 className="text-xs font-bold text-[#6b7280] uppercase tracking-wider mb-4">Money In vs Out</h3>
+      <ResponsiveContainer width="100%" height={190}>
+        <BarChart data={byMonth} barCategoryGap="28%" barGap={3}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
+          <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false} />
+          <YAxis
+            tickFormatter={(v) => `£${(v / 1000).toFixed(0)}k`}
+            tick={{ fontSize: 11, fill: "#9ca3af" }}
+            axisLine={false}
+            tickLine={false}
+            width={44}
+          />
+          <Tooltip
+            formatter={(v, name) => [fmt(Number(v)), name === "in" ? "Money In" : "Money Out"]}
+            contentStyle={{ borderRadius: 10, border: "1px solid #e0e3e8", fontSize: 12 }}
+          />
+          <Bar dataKey="in"  name="in"  fill="#22c55e" radius={[4, 4, 0, 0]} />
+          <Bar dataKey="out" name="out" fill="#0077C5" radius={[4, 4, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+      <div className="flex gap-5 mt-2 justify-center">
+        {[["#22c55e", "Money In"], ["#0077C5", "Money Out"]].map(([color, label]) => (
+          <div key={label} className="flex items-center gap-1.5">
+            <div className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: color }} />
+            <span className="text-xs text-[#6b7280]">{label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Transaction table ─────────────────────────────────────────────────────────
+
+type SortKey = "date" | "description" | "amount" | "category";
+type SortDir = "asc" | "desc";
+
+function TransactionTable({ transactions }: { transactions: Transaction[] }) {
+  const [sortKey, setSortKey]   = useState<SortKey>("date");
+  const [sortDir, setSortDir]   = useState<SortDir>("asc");
+  const [search, setSearch]     = useState("");
+  const [catFilter, setCatFilter] = useState("All");
+
+  const categories = useMemo(
+    () => ["All", ...Array.from(new Set(transactions.map((t) => t.category))).sort()],
+    [transactions]
+  );
+
+  const rows = useMemo(() => {
+    let r = [...transactions];
+    if (search) r = r.filter(
+      (t) =>
+        t.description.toLowerCase().includes(search.toLowerCase()) ||
+        t.category.toLowerCase().includes(search.toLowerCase())
+    );
+    if (catFilter !== "All") r = r.filter((t) => t.category === catFilter);
+    r.sort((a, b) => {
+      const cmp = sortKey === "amount"
+        ? a.amount - b.amount
+        : String(a[sortKey]).localeCompare(String(b[sortKey]));
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return r;
+  }, [transactions, sortKey, sortDir, search, catFilter]);
+
+  const toggleSort = (k: SortKey) => {
+    if (sortKey === k) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(k); setSortDir("asc"); }
+  };
+
+  const SortArrow = ({ k }: { k: SortKey }) =>
+    sortKey === k
+      ? <span className="ml-1 text-[#0077C5]">{sortDir === "asc" ? "↑" : "↓"}</span>
+      : <span className="ml-1 text-[#d1d5db]">↕</span>;
+
+  return (
+    <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm overflow-hidden">
+      {/* Toolbar */}
+      <div className="flex items-center gap-3 px-5 py-3.5 border-b border-[#e0e3e8] flex-wrap">
+        <h3 className="text-xs font-bold text-[#6b7280] uppercase tracking-wider flex-shrink-0">Transactions</h3>
+        <div className="relative flex-1 min-w-40">
+          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#9ca3af]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 111 11a6 6 0 0116 0z" />
+          </svg>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search…"
+            className="w-full pl-8 pr-3 py-1.5 text-xs border border-[#e0e3e8] rounded-lg outline-none focus:border-[#0077C5] focus:ring-2 focus:ring-[#0077C5]/10"
+          />
+        </div>
+        <select
+          value={catFilter}
+          onChange={(e) => setCatFilter(e.target.value)}
+          className="text-xs border border-[#e0e3e8] rounded-lg px-2.5 py-1.5 outline-none focus:border-[#0077C5] text-[#374151]"
+        >
+          {categories.map((c) => <option key={c}>{c}</option>)}
+        </select>
+        <span className="text-xs text-[#9ca3af] ml-auto flex-shrink-0">{rows.length} of {transactions.length}</span>
+      </div>
+
+      {/* Table */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-[#f9fafb] border-b border-[#e0e3e8]">
+              {(["date", "description", "category", "amount"] as SortKey[]).map((k) => (
+                <th
+                  key={k}
+                  onClick={() => toggleSort(k)}
+                  className={`px-5 py-3 text-left text-xs font-semibold uppercase tracking-wider cursor-pointer select-none hover:text-[#0077C5] transition-colors ${sortKey === k ? "text-[#0077C5]" : "text-[#6b7280]"} ${k === "amount" ? "text-right" : ""}`}
+                >
+                  {k.charAt(0).toUpperCase() + k.slice(1)}<SortArrow k={k} />
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((tx, i) => (
+              <tr
+                key={i}
+                className={`border-b border-[#f4f5f8] hover:bg-[#f7fbff] transition-colors ${i % 2 === 0 ? "bg-white" : "bg-[#fafafa]"}`}
+              >
+                <td className="px-5 py-3 text-xs text-[#6b7280] whitespace-nowrap">{tx.date}</td>
+                <td className="px-5 py-3 text-sm text-[#1a1a2e] max-w-[200px] truncate">{tx.description}</td>
+                <td className="px-5 py-3">
+                  <span
+                    className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold"
+                    style={{ backgroundColor: categoryColor(tx.category) + "20", color: categoryColor(tx.category) }}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: categoryColor(tx.category) }} />
+                    {tx.category}
+                  </span>
+                </td>
+                <td className={`px-5 py-3 text-sm font-semibold tabular-nums text-right ${tx.amount >= 0 ? "text-[#22c55e]" : "text-[#1a1a2e]"}`}>
+                  {tx.amount >= 0 ? "+" : ""}{fmt(tx.amount)}
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={4} className="px-5 py-10 text-center text-sm text-[#9ca3af]">
+                  No transactions match your filters.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Insights ──────────────────────────────────────────────────────────────────
+
+function Insights({ insights }: { insights: string[] }) {
+  return (
+    <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm p-6">
+      <h3 className="text-xs font-bold text-[#6b7280] uppercase tracking-wider mb-4">✦ AI Insights</h3>
+      <div className="space-y-3">
+        {insights.map((text, i) => (
+          <div key={i} className="flex items-start gap-3 bg-[#f0f7ff] border border-[#bfdbfe] rounded-xl px-4 py-3">
+            <div className="w-5 h-5 rounded-full bg-[#0077C5] text-white text-[10px] font-bold flex items-center justify-center flex-shrink-0 mt-0.5">
+              {i + 1}
+            </div>
+            <p className="text-sm text-[#1e40af] leading-relaxed">{text}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Anomalies ─────────────────────────────────────────────────────────────────
+
+function AnomalyPanel({ anomalies }: { anomalies: Anomaly[] }) {
+  if (!anomalies.length) return null;
+  return (
+    <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm p-6">
+      <h3 className="text-xs font-bold text-[#6b7280] uppercase tracking-wider mb-4 flex items-center gap-2">
+        <span className="w-5 h-5 rounded-full bg-[#fee2e2] flex items-center justify-center text-[#dc2626] text-xs">!</span>
+        Anomalies Detected
+      </h3>
+      <div className="space-y-3">
+        {anomalies.map((a, i) => (
+          <div key={i} className={`flex items-start gap-3 rounded-xl px-4 py-3 border ${
+            a.type === "duplicate"
+              ? "bg-[#fff7ed] border-[#fed7aa]"
+              : "bg-[#fff1f2] border-[#fecdd3]"
+          }`}>
+            <span className="text-lg flex-shrink-0 mt-0.5">
+              {a.type === "duplicate" ? "🔁" : "⚠️"}
+            </span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2 mb-0.5">
+                <p className={`text-xs font-bold uppercase tracking-wide ${
+                  a.type === "duplicate" ? "text-[#c2410c]" : "text-[#be123c]"
+                }`}>
+                  {a.type === "duplicate" ? "Possible Duplicate" : "Large Transaction"}
+                </p>
+                <span className="text-sm font-bold text-[#1a1a2e] flex-shrink-0">{fmt(a.amount)}</span>
+              </div>
+              <p className="text-sm font-medium text-[#1a1a2e] truncate">{a.description}</p>
+              <p className="text-xs text-[#6b7280] mt-0.5">{a.reason}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Tax Deductibles ───────────────────────────────────────────────────────────
+
+function TaxPanel({ items }: { items: TaxDeductible[] }) {
+  if (!items.length) return null;
+  const total = items.reduce((s, t) => s + Math.abs(t.amount), 0);
+  return (
+    <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-xs font-bold text-[#6b7280] uppercase tracking-wider flex items-center gap-2">
+          <span className="text-base">🧾</span>
+          Potential Tax Deductibles
+        </h3>
+        <div className="bg-[#dcfce7] px-3 py-1 rounded-full">
+          <span className="text-xs font-bold text-[#15803d]">Total: {fmt(total)}</span>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {items.map((item, i) => (
+          <div key={i} className="flex items-start gap-3 bg-[#f0fdf4] border border-[#bbf7d0] rounded-xl px-4 py-3">
+            <svg className="w-4 h-4 text-[#16a34a] flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-medium text-[#1a1a2e] truncate">{item.description}</p>
+                <span className="text-sm font-bold text-[#15803d] flex-shrink-0">{fmt(item.amount)}</span>
+              </div>
+              <p className="text-xs text-[#6b7280] mt-0.5">{item.reason}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-[10px] text-[#9ca3af] mt-3">
+        * These are suggestions only. Consult a tax professional to confirm deductibility.
+      </p>
+    </div>
+  );
+}
+
+// ── Main export ───────────────────────────────────────────────────────────────
+
+export default function AnalysisDashboard({ result, cached, cacheAgeSeconds }: Props) {
+  const [view, setView] = useState<"charts" | "table">("charts");
+
+  return (
+    <div className="space-y-5">
+
+      {/* Cache notice */}
+      {cached && (
+        <div className="flex items-center gap-2 bg-[#fffbeb] border border-[#fcd34d] rounded-xl px-4 py-2.5">
+          <svg className="w-4 h-4 text-[#d97706] flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <p className="text-xs font-medium text-[#92400e]">
+            Cached result from {Math.round((cacheAgeSeconds ?? 0) / 60)} min ago — identical statement already analyzed.
+          </p>
+        </div>
+      )}
+
+      {/* Summary row */}
+      <SummaryCards result={result} />
+
+      {/* Anomalies */}
+      {result.anomalies && result.anomalies.length > 0 && (
+        <AnomalyPanel anomalies={result.anomalies} />
+      )}
+
+      {/* Tax deductibles */}
+      {result.tax_deductibles && result.tax_deductibles.length > 0 && (
+        <TaxPanel items={result.tax_deductibles} />
+      )}
+
+      {/* Insights */}
+      {result.insights?.length > 0 && <Insights insights={result.insights} />}
+
+      {/* View toggle */}
+      <div className="flex gap-2">
+        {(["charts", "table"] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setView(t)}
+            className={`px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+              view === t
+                ? "bg-[#0077C5] text-white shadow-sm"
+                : "bg-white border border-[#e0e3e8] text-[#6b7280] hover:border-[#0077C5] hover:text-[#0077C5]"
+            }`}
+          >
+            {t === "charts" ? "📊 Charts" : "📋 Transactions"}
+          </button>
+        ))}
+      </div>
+
+      {/* Charts */}
+      {view === "charts" && (
+        <div className="grid md:grid-cols-2 gap-5">
+          <DonutChart summary={result.summary} />
+          <CashFlowBar transactions={result.transactions} />
+        </div>
+      )}
+
+      {/* Table */}
+      {view === "table" && <TransactionTable transactions={result.transactions} />}
+    </div>
   );
 }

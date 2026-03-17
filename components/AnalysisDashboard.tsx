@@ -15,12 +15,32 @@ interface Transaction {
   category: string;
 }
 
-interface AnalysisResult {
+interface Anomaly {
+  type: "large_transaction" | "duplicate";
+  description: string;
+  amount: number;
+  reason: string;
+}
+
+interface TaxDeductible {
+  description: string;
+  amount: number;
+  reason: string;
+}
+
+export interface AnalysisResult {
   transactions: Transaction[];
   summary: Record<string, number>;
   total_in: number;
   total_out: number;
   insights: string[];
+  anomalies?: Anomaly[];
+  tax_deductibles?: TaxDeductible[];
+  // private proxy fields
+  _cached?: boolean;
+  _cacheAgeSeconds?: number;
+  _extractionMode?: string;
+  _transactionsFound?: number;
 }
 
 interface Props {
@@ -334,6 +354,84 @@ function Insights({ insights }: { insights: string[] }) {
   );
 }
 
+// ── Anomalies ─────────────────────────────────────────────────────────────────
+
+function AnomalyPanel({ anomalies }: { anomalies: Anomaly[] }) {
+  if (!anomalies.length) return null;
+  return (
+    <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm p-6">
+      <h3 className="text-xs font-bold text-[#6b7280] uppercase tracking-wider mb-4 flex items-center gap-2">
+        <span className="w-5 h-5 rounded-full bg-[#fee2e2] flex items-center justify-center text-[#dc2626] text-xs">!</span>
+        Anomalies Detected
+      </h3>
+      <div className="space-y-3">
+        {anomalies.map((a, i) => (
+          <div key={i} className={`flex items-start gap-3 rounded-xl px-4 py-3 border ${
+            a.type === "duplicate"
+              ? "bg-[#fff7ed] border-[#fed7aa]"
+              : "bg-[#fff1f2] border-[#fecdd3]"
+          }`}>
+            <span className="text-lg flex-shrink-0 mt-0.5">
+              {a.type === "duplicate" ? "🔁" : "⚠️"}
+            </span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2 mb-0.5">
+                <p className={`text-xs font-bold uppercase tracking-wide ${
+                  a.type === "duplicate" ? "text-[#c2410c]" : "text-[#be123c]"
+                }`}>
+                  {a.type === "duplicate" ? "Possible Duplicate" : "Large Transaction"}
+                </p>
+                <span className="text-sm font-bold text-[#1a1a2e] flex-shrink-0">{fmt(a.amount)}</span>
+              </div>
+              <p className="text-sm font-medium text-[#1a1a2e] truncate">{a.description}</p>
+              <p className="text-xs text-[#6b7280] mt-0.5">{a.reason}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Tax Deductibles ───────────────────────────────────────────────────────────
+
+function TaxPanel({ items }: { items: TaxDeductible[] }) {
+  if (!items.length) return null;
+  const total = items.reduce((s, t) => s + Math.abs(t.amount), 0);
+  return (
+    <div className="bg-white rounded-2xl border border-[#e0e3e8] shadow-sm p-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-xs font-bold text-[#6b7280] uppercase tracking-wider flex items-center gap-2">
+          <span className="text-base">🧾</span>
+          Potential Tax Deductibles
+        </h3>
+        <div className="bg-[#dcfce7] px-3 py-1 rounded-full">
+          <span className="text-xs font-bold text-[#15803d]">Total: {fmt(total)}</span>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {items.map((item, i) => (
+          <div key={i} className="flex items-start gap-3 bg-[#f0fdf4] border border-[#bbf7d0] rounded-xl px-4 py-3">
+            <svg className="w-4 h-4 text-[#16a34a] flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-medium text-[#1a1a2e] truncate">{item.description}</p>
+                <span className="text-sm font-bold text-[#15803d] flex-shrink-0">{fmt(item.amount)}</span>
+              </div>
+              <p className="text-xs text-[#6b7280] mt-0.5">{item.reason}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-[10px] text-[#9ca3af] mt-3">
+        * These are suggestions only. Consult a tax professional to confirm deductibility.
+      </p>
+    </div>
+  );
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export default function AnalysisDashboard({ result, cached, cacheAgeSeconds }: Props) {
@@ -356,6 +454,16 @@ export default function AnalysisDashboard({ result, cached, cacheAgeSeconds }: P
 
       {/* Summary row */}
       <SummaryCards result={result} />
+
+      {/* Anomalies */}
+      {result.anomalies && result.anomalies.length > 0 && (
+        <AnomalyPanel anomalies={result.anomalies} />
+      )}
+
+      {/* Tax deductibles */}
+      {result.tax_deductibles && result.tax_deductibles.length > 0 && (
+        <TaxPanel items={result.tax_deductibles} />
+      )}
 
       {/* Insights */}
       {result.insights?.length > 0 && <Insights insights={result.insights} />}
