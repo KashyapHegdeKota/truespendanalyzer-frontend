@@ -1,11 +1,14 @@
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import { useState, useCallback, useRef } from "react";
 import AuthGuard from "@/lib/AuthGuard";
 import { useAuth } from "@/lib/AuthContext";
 import { signOut } from "@/lib/firebase";
 import { auth } from "@/lib/firebase";
 import { redactionSummary } from "@/lib/ScrubPII";
+import AnalysisDashboard from "@/components/AnalysisDashboard";
 
 interface ParsedPDF {
   text: string;
@@ -338,18 +341,23 @@ function PDFParserInner() {
                 )}
               </div>
 
-              {/* Analysis tab — renders whatever your backend returns */}
+              {/* Analysis tab */}
               {activeTab === "analysis" && (
                 <div className="p-6">
-                  {analysis ? (
-                    <pre className="text-sm text-[#374151] leading-relaxed whitespace-pre-wrap break-words overflow-auto max-h-[480px] bg-[#f9fafb] rounded-xl p-5 border border-[#e0e3e8]"
-                      style={{ fontFamily: "'Courier New', monospace", scrollbarColor: "#c8d3df transparent" }}>
-                      {JSON.stringify(analysis, null, 2)}
-                    </pre>
+                  {analysis?.transactions?.length > 0 ? (
+                    <AnalysisDashboard
+                      result={analysis!}
+                      cached={analysis!._cached}
+                      cacheAgeSeconds={analysis!._cacheAgeSeconds}
+                    />
                   ) : (
                     <div className="flex flex-col items-center gap-3 py-10 text-center">
                       <div className="w-12 h-12 rounded-2xl bg-[#f4f5f8] flex items-center justify-center text-2xl">📊</div>
-                      <p className="text-sm text-[#6b7280]">Analysis results will appear here once your backend responds.</p>
+                      <p className="text-sm text-[#6b7280]">
+                        {analysis
+                          ? "Backend returned no transactions. Check your parser regex."
+                          : "Analysis results will appear here once your backend responds."}
+                      </p>
                     </div>
                   )}
                 </div>
